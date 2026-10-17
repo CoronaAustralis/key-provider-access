@@ -22,12 +22,14 @@ import (
 const maxPolicyFileSize = 2 << 20
 
 type pluginConfig struct {
-	Enabled    *bool          `json:"enabled,omitempty" yaml:"enabled,omitempty"`
-	Priority   int            `json:"priority,omitempty" yaml:"priority,omitempty"`
-	Store      any            `json:"store,omitempty" yaml:"store,omitempty"`
-	PolicyFile string         `json:"policy_file,omitempty" yaml:"policy_file,omitempty"`
-	Version    int            `json:"version,omitempty" yaml:"version,omitempty"`
-	Policies   []policyConfig `json:"policies,omitempty" yaml:"policies,omitempty"`
+	Enabled          *bool          `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Priority         int            `json:"priority,omitempty" yaml:"priority,omitempty"`
+	Store            any            `json:"store,omitempty" yaml:"store,omitempty"`
+	PolicyFile       string         `json:"policy_file,omitempty" yaml:"policy_file,omitempty"`
+	Version          int            `json:"version,omitempty" yaml:"version,omitempty"`
+	Policies         []policyConfig `json:"policies,omitempty" yaml:"policies,omitempty"`
+	ManagementURL    string         `json:"management_url,omitempty" yaml:"management_url,omitempty"`
+	ManagementKeyEnv string         `json:"management_key_env,omitempty" yaml:"management_key_env,omitempty"`
 }
 
 type policyDocument struct {
@@ -37,11 +39,15 @@ type policyDocument struct {
 
 type policyConfig struct {
 	CallerScope   string   `json:"caller_scope" yaml:"caller_scope" toml:"caller_scope"`
+	AllowModels   []string `json:"allow_models" yaml:"allow_models" toml:"allow_models"`
+	DenyModels    []string `json:"deny_models" yaml:"deny_models" toml:"deny_models"`
 	AllowProfiles []string `json:"allow_profiles" yaml:"allow_profiles" toml:"allow_profiles"`
 	DenyProfiles  []string `json:"deny_profiles" yaml:"deny_profiles" toml:"deny_profiles"`
 }
 
 type runtimePolicy struct {
+	AllowModels   []string
+	DenyModels    []string
 	AllowProfiles []string
 	DenyProfiles  []string
 }
@@ -64,11 +70,10 @@ type state struct {
 	revision       uint64
 	pickCursor     map[string]uint64
 	legacyAliases  map[string]map[string]string
-	autoAllowed    map[string]map[string]struct{}
 }
 
 var (
-	globalState = state{snapshot: failClosedSnapshot(), pickCursor: make(map[string]uint64), legacyAliases: make(map[string]map[string]string), autoAllowed: make(map[string]map[string]struct{})}
+	globalState = state{snapshot: failClosedSnapshot(), pickCursor: make(map[string]uint64), legacyAliases: make(map[string]map[string]string)}
 	mutationMu  sync.Mutex
 )
 
@@ -77,6 +82,7 @@ func failClosedSnapshot() policySnapshot {
 }
 
 func (s *state) clear() {
+	catalogAccess.clear()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.config = pluginConfig{}
@@ -90,7 +96,6 @@ func (s *state) clear() {
 	s.revision = 0
 	s.pickCursor = make(map[string]uint64)
 	s.legacyAliases = make(map[string]map[string]string)
-	s.autoAllowed = make(map[string]map[string]struct{})
 }
 
 func (s *state) current() (pluginConfig, policySnapshot, string, time.Time, uint32, string) {
@@ -117,7 +122,6 @@ func (s *state) replace(cfg pluginConfig, snapshot policySnapshot, source string
 	s.runtimeWarning = ""
 	s.revision++
 	s.legacyAliases = make(map[string]map[string]string)
-	s.autoAllowed = make(map[string]map[string]struct{})
 }
 
 func (s *state) policyRevision() uint64 {
@@ -148,30 +152,6 @@ func (s *state) legacyAlias(scope, current string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.legacyAliases[strings.TrimSpace(scope)][strings.TrimSpace(current)]
-}
-
-func (s *state) rememberAutoAllowed(scope, profile string) {
-	scope = strings.TrimSpace(scope)
-	profile = strings.TrimSpace(profile)
-	if scope == "" || profile == "" {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.autoAllowed == nil {
-		s.autoAllowed = make(map[string]map[string]struct{})
-	}
-	if s.autoAllowed[scope] == nil {
-		s.autoAllowed[scope] = make(map[string]struct{})
-	}
-	s.autoAllowed[scope][profile] = struct{}{}
-}
-
-func (s *state) isAutoAllowed(scope, profile string) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	_, ok := s.autoAllowed[strings.TrimSpace(scope)][strings.TrimSpace(profile)]
-	return ok
 }
 
 func (s *state) setHostSchema(schema uint32) {
@@ -225,7 +205,7 @@ func configure(raw []byte) error {
 	if err := decodeJSON(raw, &req); err != nil {
 		return err
 	}
-	cfg := pluginConfig{Version: int(schemaVersion)}
+	cfg := pluginConfig{Version: int(schemaVersion), ManagementURL: defaultManagementURL, ManagementKeyEnv: defaultManagementKeyEnv}
 	if req.SchemaVersion < schemaVersion {
 		globalState.failClosedOrPreserve(cfg, req.SchemaVersion, fmt.Errorf("%s requires CPA plugin RPC schema 2 or newer (CPA v7.2.103+)", pluginID))
 		return nil
@@ -237,6 +217,12 @@ func configure(raw []byte) error {
 		}
 	}
 	cfg.PolicyFile = strings.TrimSpace(cfg.PolicyFile)
+	cfg.ManagementURL = managementURL(cfg)
+	cfg.ManagementKeyEnv = strings.TrimSpace(cfg.ManagementKeyEnv)
+	if err := validateManagementURL(cfg.ManagementURL); err != nil {
+		globalState.failClosedOrPreserve(cfg, req.SchemaVersion, err)
+		return nil
+	}
 
 	document := documentFromConfig(cfg)
 	source := "inline config"
@@ -271,6 +257,8 @@ func clonePolicyConfigs(policies []policyConfig) []policyConfig {
 	for index, policy := range policies {
 		cloned[index] = policyConfig{
 			CallerScope:   policy.CallerScope,
+			AllowModels:   append([]string{}, policy.AllowModels...),
+			DenyModels:    append([]string{}, policy.DenyModels...),
 			AllowProfiles: append([]string{}, policy.AllowProfiles...),
 			DenyProfiles:  append([]string{}, policy.DenyProfiles...),
 		}
@@ -360,6 +348,14 @@ func compileDocument(document policyDocument) (policySnapshot, policyDocument, e
 			return policySnapshot{}, policyDocument{}, fmt.Errorf("duplicate caller_scope at policies[%d]", index)
 		}
 		var err error
+		item.AllowModels, err = normalizePatterns(item.AllowModels, fmt.Sprintf("policies[%d].allow_models", index))
+		if err != nil {
+			return policySnapshot{}, policyDocument{}, err
+		}
+		item.DenyModels, err = normalizePatterns(item.DenyModels, fmt.Sprintf("policies[%d].deny_models", index))
+		if err != nil {
+			return policySnapshot{}, policyDocument{}, err
+		}
 		item.AllowProfiles, err = normalizePatterns(item.AllowProfiles, fmt.Sprintf("policies[%d].allow_profiles", index))
 		if err != nil {
 			return policySnapshot{}, policyDocument{}, err
@@ -369,6 +365,8 @@ func compileDocument(document policyDocument) (policySnapshot, policyDocument, e
 			return policySnapshot{}, policyDocument{}, err
 		}
 		snapshot.ByCallerScope[item.CallerScope] = runtimePolicy{
+			AllowModels:   append([]string(nil), item.AllowModels...),
+			DenyModels:    append([]string(nil), item.DenyModels...),
 			AllowProfiles: append([]string(nil), item.AllowProfiles...),
 			DenyProfiles:  append([]string(nil), item.DenyProfiles...),
 		}

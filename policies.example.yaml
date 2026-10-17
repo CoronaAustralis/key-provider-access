@@ -3,6 +3,10 @@ version: 2
 # Use the Web UI to generate caller scopes and select live auth profile IDs.
 policies:
   - caller_scope: "f7291f3315e5ab0d3c02015a081879d748693f231d8370b43f38f57be991734a"
+    allow_models:
+      - "gpt-*"
+    deny_models:
+      - "*-preview"
     allow_profiles:
       - "codex:apikey:abc123def456"
       - "oauth-profile-id"

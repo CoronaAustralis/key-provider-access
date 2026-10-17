@@ -7,12 +7,13 @@ import (
 )
 
 const (
-	abiVersion    uint32 = 1
-	schemaVersion uint32 = 2
-	pluginID             = "key-provider-access"
+	abiVersion          uint32 = 1
+	schemaVersion       uint32 = 2
+	maxRPCSchemaVersion uint32 = 6
+	pluginID                   = "key-provider-access"
 )
 
-var pluginVersion = "0.0.5"
+var pluginVersion = "0.2.0"
 
 const (
 	methodPluginRegister         = "plugin.register"
@@ -20,6 +21,7 @@ const (
 	methodSchedulerPick          = "scheduler.pick"
 	methodRequestInterceptBefore = "request.intercept_before"
 	methodRequestInterceptAfter  = "request.intercept_after"
+	methodResponseInterceptAfter = "response.intercept_after"
 	methodManagementRegister     = "management.register"
 	methodManagementHandle       = "management.handle"
 )
@@ -65,9 +67,11 @@ type configField struct {
 }
 
 type capabilities struct {
-	RequestInterceptor bool `json:"request_interceptor"`
-	Scheduler          bool `json:"scheduler"`
-	ManagementAPI      bool `json:"management_api"`
+	RequestInterceptor        bool `json:"request_interceptor"`
+	Scheduler                 bool `json:"scheduler"`
+	SchedulerAcrossPriorities bool `json:"scheduler_across_priorities"`
+	ResponseInterceptor       bool `json:"response_interceptor"`
+	ManagementAPI             bool `json:"management_api"`
 }
 
 type requestInterceptRequest struct {
@@ -150,4 +154,23 @@ type managementResponse struct {
 	StatusCode int         `json:"StatusCode"`
 	Headers    http.Header `json:"Headers,omitempty"`
 	Body       []byte      `json:"Body,omitempty"`
+}
+
+// responseInterceptRequest is the subset used by model catalog filtering.
+type responseInterceptRequest struct {
+	SourceFormat    string         `json:"SourceFormat"`
+	Model           string         `json:"Model"`
+	RequestedModel  string         `json:"RequestedModel"`
+	Stream          bool           `json:"Stream"`
+	RequestHeaders  http.Header    `json:"RequestHeaders"`
+	OriginalRequest []byte         `json:"OriginalRequest"`
+	RequestBody     []byte         `json:"RequestBody"`
+	StatusCode      int            `json:"StatusCode"`
+	Body            []byte         `json:"Body"`
+	Metadata        map[string]any `json:"Metadata"`
+}
+type responseInterceptResponse struct {
+	Headers      http.Header `json:"Headers,omitempty"`
+	Body         []byte      `json:"Body,omitempty"`
+	ClearHeaders []string    `json:"ClearHeaders,omitempty"`
 }

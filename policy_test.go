@@ -282,7 +282,7 @@ func TestSuccessfulPolicyEnforcementClearsRuntimeWarning(t *testing.T) {
 	}
 }
 
-func TestSchedulerTransientlyAdoptsRotatedProfileIDs(t *testing.T) {
+func TestSchedulerRejectsUnknownProfileIDs(t *testing.T) {
 	installTestPolicy(t, policyDocument{Version: 2, Policies: []policyConfig{{
 		CallerScope: scopeA, AllowProfiles: []string{"gemini:apikey:old-id"},
 	}}})
@@ -296,16 +296,18 @@ func TestSchedulerTransientlyAdoptsRotatedProfileIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var selected schedulerPickResponse
-	unwrapEnvelope(t, rawResponse, &selected)
-	if !selected.Handled || selected.AuthID != "gemini:apikey:new-id" {
-		t.Fatalf("rotated profile was not adopted: %#v", selected)
+	var wrapped envelope
+	if err := json.Unmarshal(rawResponse, &wrapped); err != nil {
+		t.Fatal(err)
 	}
-	allowed := callIntercept(t, requestInterceptRequest{Metadata: map[string]any{
-		"caller_scope": scopeA, "selected_auth_id": selected.AuthID,
+	if wrapped.OK || wrapped.Error == nil || wrapped.Error.HTTPStatus != http.StatusForbidden {
+		t.Fatalf("unknown profile must not bypass whitelist: %s", rawResponse)
+	}
+	denied := callIntercept(t, requestInterceptRequest{Metadata: map[string]any{
+		"caller_scope": scopeA, "selected_auth_id": "gemini:apikey:new-id",
 	}})
-	if allowed.Terminate {
-		t.Fatalf("transiently adopted profile was rejected after auth: %#v", allowed)
+	if !denied.Terminate {
+		t.Fatal("unknown profile was accepted after auth")
 	}
 }
 

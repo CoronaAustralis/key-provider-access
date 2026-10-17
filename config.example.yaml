@@ -7,12 +7,19 @@ plugins:
   enabled: true
   dir: "plugins"
   configs:
+    # Disable key-model-access after merging its model rules into this plugin.
     key-provider-access:
       enabled: true
       priority: 100
 
+      # Use this CPA instance's local address (adjust its port/TLS as needed).
+      management_url: "http://127.0.0.1:8317"
+      # Existing CPA Management Key in the process environment. If absent,
+      # open the plugin settings after each restart to supply a memory-only session.
+      management_key_env: "MANAGEMENT_PASSWORD"
+
       # Safe default: authenticated CPA keys without a policy may use every
-      # upstream auth profile currently eligible for the requested route.
+      # model and upstream auth profile eligible for the requested route.
       version: 2
       policies: []
 

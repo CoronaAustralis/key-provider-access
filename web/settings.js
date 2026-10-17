@@ -22,7 +22,6 @@
   const CPAMC_AUTH_KEY = "cli-proxy-auth";
   const CPAMC_THEME_KEY = "cli-proxy-theme";
   const CPAMC_LANGUAGE_KEY = "cli-proxy-language";
-  const PROFILE_CACHE_KEY = "key-provider-access-profile-cache-v1";
   const SUPPORTED_LANGUAGES = new Set(["en", "zh-CN", "zh-TW", "ru"]);
   const OBFUSCATION_PREFIX = "enc::v1::";
   const OBFUSCATION_SALT = "cli-proxy-api-webui::secure-storage";
@@ -45,11 +44,11 @@
     status: null,
     keys: [],
     profiles: [],
+    models: [],
+    modelsError: "",
     profilesError: "",
     persistenceSetupError: "",
     stalePolicies: [],
-    profileCache: {},
-    reconcileNotice: "",
     revision: 0,
     selectedIndex: -1,
     dirty: false,
@@ -73,12 +72,22 @@
   // and deliberately falls back to English instead of the browser's Chinese
   // locale. Chinese remains available for existing installations.
   const ENGLISH_REPLACEMENTS = [
+    ["模型目录连接失败：", "Model catalog connection failed: "],
+    ["请检查插件 management_url 和管理会话；目录连接恢复前，受限目录返回空列表。", "Check the plugin management_url and management session. Restricted catalogs remain empty until the connection recovers."],
+    ["模型规则", "Model rules"],
+    ["允许模型", "Allow models"],
+    ["拒绝模型", "Deny models"],
+    ["模型必须同时通过模型规则和上游配置规则，才会显示在模型列表中。", "Models appear only when both model and provider rules allow access."],
+    ["当前默认允许全部模型和上游配置。", "All models and providers are currently allowed by default."],
+    ["选择模型或上游配置规则后保存。", "Select model or provider rules, then save."],
+    ["模型目录", "Model catalog"],
+    ["模型", "models"],
     ["正在接入管理会话", "Connecting to management session"],
     ["正在只读获取 CPAMC 当前连接信息，无需再次输入 Management Key。", "Reading the current CPAMC connection in read-only mode. No second Management Key is required."],
     ["重新读取会话", "Read session again"],
     ["插件只读取 CPAMC 已保存的同源会话，不会复制或再次持久化 Management Key。", "The plugin only reads the saved same-origin CPAMC session; it never copies or persists the Management Key again."],
-    ["上游配置权限", "Key Provider Access"],
-    ["现有 Key 的上游配置访问策略", "Provider access policies for existing CPA keys"],
+    ["上游配置权限", "Key Model and Provider Access"],
+    ["现有 Key 的模型与上游访问策略", "Model and provider access policies for existing CPA keys"],
     ["策略导航", "Policy navigation"],
     ["只读来源", "Read-only source"],
     ["搜索 Key", "Search keys"],
@@ -87,21 +96,21 @@
     ["正在连接", "Connecting"],
     ["刷新 CPA Key 与策略", "Refresh CPA keys and policies"],
     ["从策略文件重载", "Reload from policy file"],
-    ["保存上游配置规则", "Save provider rules"],
+    ["保存权限规则", "Save access rules"],
     ["权限概览", "Access overview"],
     ["认证由 CPA 管理", "Authentication managed by CPA"],
     ["当前 CPA API Keys", "Current CPA API keys"],
     ["没有匹配的 Key", "No matching keys"],
     ["CPA 当前没有 API Key", "CPA has no API keys"],
-    ["上游配置权限概览", "Provider access overview"],
-    ["API Key 的创建、删除和生命周期完全由 CPA 管理；此页面只为现有 Key 配置上游配置规则。", "CPA manages API key creation, deletion, and lifecycle; this page configures provider rules for existing keys."],
+    ["模型与上游权限概览", "Model and provider access overview"],
+    ["API Key 由 CPA 管理；此页面为现有 Key 配置模型和上游权限。", "CPA manages API keys; this page configures model and provider access for existing keys."],
     ["权限统计", "Access statistics"],
     ["当前 CPA Key", "Current CPA keys"],
     ["只读同步", "Read-only sync"],
     ["已配置", "Configured"],
     ["含 allow 或 deny", "Has allow or deny rules"],
     ["默认允许", "Default allow"],
-    ["没有上游配置规则", "No provider rules"],
+    ["没有权限规则", "No access rules"],
     ["失效策略", "Stale policies"],
     ["保存时仍保留", "Preserved when saving"],
     ["Provider 访问计数", "Provider access counts"],
@@ -109,7 +118,7 @@
     ["认证边界", "Authentication boundary"],
     ["Key 身份与上游配置授权相互分离。", "Key identity and provider authorization are kept separate."],
     ["认证由 CPA 内置 API Keys 管理", "Authentication is managed by CPA's built-in API keys"],
-    ["插件仅接收 CPA 提供的 caller scope，并据此执行 allow_profiles 与 deny_profiles。未配置策略或规则为空时，默认允许全部上游配置。", "The plugin receives only CPA's caller scope and applies allow_profiles and deny_profiles. With no policy or empty rules, all providers are allowed by default."],
+    ["插件按 caller scope 同时检查模型和上游配置规则，并过滤模型列表；未配置规则的 Key 默认允许全部。", "The plugin checks model and provider rules by caller scope and filters model lists. Keys without rules allow all access."],
     ["运行状态", "Runtime status"],
     ["来自当前 CPA 插件实例。", "Reported by the current CPA plugin instance."],
     ["认证模式", "Authentication mode"],
@@ -235,19 +244,6 @@
     return SUPPORTED_LANGUAGES.has(normalized) ? normalized : "en";
   }
 
-  function loadProfileCache() {
-    try {
-      const parsed = JSON.parse(localStorage.getItem(PROFILE_CACHE_KEY) || "{}");
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-    } catch (_) {
-      return {};
-    }
-  }
-
-  function saveProfileCache() {
-    try { localStorage.setItem(PROFILE_CACHE_KEY, JSON.stringify(state.profileCache)); } catch (_) { /* cache is optional */ }
-  }
-
   function translateText(value) {
     let text = String(value ?? "");
     if (currentLanguage === "zh-CN") {
@@ -285,7 +281,7 @@
       .replace(/^策略 (\d+) 格式无效。$/, "Policy $1 has an invalid format.")
       .replace(/^策略 (\d+) 的 caller scope 无效。$/, "Policy $1 has an invalid caller scope.")
       .replace(/^策略 (\d+) 的 caller scope 重复。$/, "Policy $1 has a duplicate caller scope.")
-      .replace(/^策略 (\d+) 的 (allow_profiles|deny_profiles) 无效。$/, "Policy $1 has an invalid $2.")
+      .replace(/^策略 (\d+) 的 (allow_models|deny_models|allow_profiles|deny_profiles) 无效。$/, "Policy $1 has an invalid $2.")
       .replace(/^请求失败（HTTP (\d+)）。$/, "Request failed (HTTP $1).")
       .replace(/^已加载 (\d+) 个上游配置$/, "Loaded $1 providers")
       .replace(/^已匹配 (\d+) \/ (\d+) 个上游配置$/, "Matched $1 / $2 providers");
@@ -389,10 +385,14 @@
   }
 
   function oppositeProfileKind(kind) {
-    return kind === "allow_profiles" ? "deny_profiles" : "allow_profiles";
+    return kind.startsWith("allow_") ? kind.replace("allow_", "deny_") : kind.replace("deny_", "allow_");
   }
 
-  function profileRulesConflict(rule, oppositeRules) {
+  function catalogForKind(kind) {
+    return kind?.endsWith("_models") ? state.models : state.profiles;
+  }
+
+  function profileRulesConflict(rule, oppositeRules, kind = state.openPicker) {
     if (!rule || !oppositeRules.length) return false;
     if (rule === "*" || oppositeRules.includes("*")) return true;
     const wildcard = rule.includes("*") || rule.includes("?");
@@ -400,7 +400,7 @@
       const oppositeWildcard = oppositeRule.includes("*") || oppositeRule.includes("?");
       if (!wildcard) return profilePatternMatches(oppositeRule, rule);
       if (!oppositeWildcard) return profilePatternMatches(rule, oppositeRule);
-      return state.profiles.some((profile) => profilePatternMatches(rule, profile.id) && profilePatternMatches(oppositeRule, profile.id));
+      return catalogForKind(kind).some((profile) => profilePatternMatches(rule, profile.id) && profilePatternMatches(oppositeRule, profile.id));
     });
   }
 
@@ -415,7 +415,8 @@
       if (!/^[0-9a-f]{64}$/.test(scope)) throw new Error(`策略 ${index + 1} 的 caller scope 无效。`);
       if (seen.has(scope)) throw new Error(`策略 ${index + 1} 的 caller scope 重复。`);
       seen.add(scope);
-      for (const field of ["allow_profiles", "deny_profiles"]) {
+      for (const field of ["allow_models", "deny_models", "allow_profiles", "deny_profiles"]) {
+        if (item[field] === undefined) item = { ...item, [field]: [] };
         if (!Array.isArray(item[field]) || item[field].some((profile) => typeof profile !== "string" || !profile.trim())) {
           throw new Error(`策略 ${index + 1} 的 ${field} 无效。`);
         }
@@ -423,7 +424,9 @@
       return {
         caller_scope: scope,
         allow_profiles: normalizeProfiles(item.allow_profiles),
-        deny_profiles: normalizeProfiles(item.deny_profiles)
+        deny_profiles: normalizeProfiles(item.deny_profiles),
+        allow_models: normalizeProfiles(item.allow_models),
+        deny_models: normalizeProfiles(item.deny_models)
       };
     });
     return { version: 2, policies };
@@ -630,10 +633,24 @@
         add(id, "vertex", "vertex API provider", "api");
       }
 
+      // Use management-authenticated registry reads, so a restricted downstream
+      // key cannot hide options from the permission editor.
+      const modelReads = await Promise.allSettled(profiles.map((profile) => api(`/v0/management/auth-files/models?name=${encodeURIComponent(profile.id)}`, { method: "GET" })));
+      const modelsByID = new Map();
+      for (let i = 0; i < modelReads.length; i += 1) {
+        const result = modelReads[i];
+        if (result.status !== "fulfilled") continue;
+        for (const model of result.value?.models || []) {
+          const id = String(model?.id || "").trim();
+          if (id && !modelsByID.has(id)) modelsByID.set(id, { id, provider: String(model.owned_by || profiles[i].provider || ""), displayName: id, kind: "model" });
+        }
+      }
+      const models = [...modelsByID.values()].sort((a, b) => a.id.localeCompare(b.id));
+      const modelsError = modelReads.some((result) => result.status === "rejected") ? "部分模型目录加载失败，请刷新重试。" : models.length ? "" : "没有可用的模型目录。";
       profiles.sort((left, right) => left.provider.localeCompare(right.provider) || left.id.localeCompare(right.id));
-      return { profiles, error: profiles.length ? "" : "CPA 当前没有可用的 OAuth 或 API provider 配置。" };
+      return { profiles, models, modelsError, error: profiles.length ? "" : "CPA 当前没有可用的 OAuth 或 API provider 配置。" };
     } catch (error) {
-      return { profiles: [], error: error.message || "上游配置目录加载失败。" };
+      return { profiles: [], models: [], modelsError: "模型目录加载失败。", error: error.message || "上游配置目录加载失败。" };
     }
   }
 
@@ -654,7 +671,9 @@
         scope,
         masked: maskCPAKey(normalizedValues[index]),
         allow_profiles: [],
-        deny_profiles: []
+        deny_profiles: [],
+        allow_models: [],
+        deny_models: []
       })).filter((key) => {
         if (seen.has(key.scope)) return false;
         seen.add(key.scope);
@@ -730,71 +749,14 @@
       return {
         ...key,
         allow_profiles: policy ? [...policy.allow_profiles] : [],
-        deny_profiles: policy ? [...policy.deny_profiles] : []
+        deny_profiles: policy ? [...policy.deny_profiles] : [],
+        allow_models: policy ? [...policy.allow_models] : [],
+        deny_models: policy ? [...policy.deny_models] : []
       };
     });
     state.stalePolicies = documentValue.policies
       .filter((policy) => !currentScopes.has(policy.caller_scope))
-      .map((policy) => ({ ...policy, allow_profiles: [...policy.allow_profiles], deny_profiles: [...policy.deny_profiles] }));
-  }
-
-  function reconcileProfilePolicies() {
-    if (!state.profiles.length || !state.keys.length) return;
-    const current = new Set(state.profiles.map((profile) => String(profile.id || "").trim()).filter(Boolean));
-    if (!current.size) return;
-    let removed = 0;
-    let restored = 0;
-    let added = 0;
-    let changed = false;
-    for (const key of state.keys) {
-      const cached = state.profileCache[key.scope] && typeof state.profileCache[key.scope] === "object"
-        ? state.profileCache[key.scope]
-        : (state.profileCache[key.scope] = {});
-      for (const side of ["allow_profiles", "deny_profiles"]) {
-        const retained = [];
-        for (const rule of key[side]) {
-          const exact = !String(rule).includes("*") && !String(rule).includes("?");
-          if (exact && !current.has(rule)) {
-            const decision = cached[rule] || {};
-            decision[side === "allow_profiles" ? "allow" : "deny"] = true;
-            cached[rule] = decision;
-            removed += 1;
-            changed = true;
-          } else {
-            retained.push(rule);
-          }
-        }
-        key[side] = retained;
-      }
-      for (const profileID of current) {
-        const hasAllow = key.allow_profiles.some((rule) => profilePatternMatches(rule, profileID));
-        const hasDeny = key.deny_profiles.some((rule) => profilePatternMatches(rule, profileID));
-        const decision = cached[profileID];
-        if (decision && !hasAllow && !hasDeny) {
-          if (decision.allow) key.allow_profiles.push(profileID);
-          if (decision.deny) key.deny_profiles.push(profileID);
-          delete cached[profileID];
-          restored += 1;
-          changed = true;
-        } else if (decision && (hasAllow || hasDeny)) {
-          delete cached[profileID];
-          changed = true;
-        } else if (!decision && !hasAllow && !hasDeny && key.allow_profiles.length && !key.deny_profiles.some((rule) => profilePatternMatches(rule, profileID))) {
-          key.allow_profiles.push(profileID);
-          added += 1;
-          changed = true;
-        }
-      }
-      if (!Object.keys(cached).length) delete state.profileCache[key.scope];
-    }
-    if (!changed) return;
-    saveProfileCache();
-    state.dirty = true;
-    const parts = [];
-    if (removed) parts.push(`${removed} 个失效上游配置已移入缓存`);
-    if (restored) parts.push(`${restored} 个恢复的上游配置已恢复原规则`);
-    if (added) parts.push(`${added} 个新上游配置已自动允许`);
-    state.reconcileNotice = `${parts.join("；")}。请检查并保存策略。`;
+      .map((policy) => ({ ...policy, allow_profiles: [...policy.allow_profiles], deny_profiles: [...policy.deny_profiles], allow_models: [...policy.allow_models], deny_models: [...policy.deny_models] }));
   }
 
   function installRemoteData(remote, preferredScope = "") {
@@ -802,11 +764,12 @@
     state.keys = remote.keys;
     state.profiles = remote.catalog?.profiles || [];
     state.profilesError = remote.catalog?.error || "";
+    state.models = remote.catalog?.models || [];
+    state.modelsError = remote.catalog?.modelsError || "";
     state.persistenceSetupError = remote.persistenceSetupError || "";
     applyPolicyDocument(remote.policies?.policy);
     state.dirty = false;
-    state.reconcileNotice = "";
-    reconcileProfilePolicies();
+    // Exact allow lists are never expanded automatically.
     state.revision = Number(remote.policies?.revision ?? remote.status?.revision ?? 0);
     state.openPicker = "";
     state.pickerQuery = "";
@@ -870,6 +833,8 @@
     state.status = null;
     state.keys = [];
     state.profiles = [];
+    state.models = [];
+    state.modelsError = "";
     state.stalePolicies = [];
     state.dirty = false;
     state.sessionEnded = false;
@@ -973,7 +938,7 @@
   }
 
   function hasRules(key) {
-    return key.allow_profiles.length > 0 || key.deny_profiles.length > 0;
+    return ["allow_models", "deny_models", "allow_profiles", "deny_profiles"].some((field) => key[field].length > 0);
   }
 
   function keyAllowsProfile(key, profileID) {
@@ -1039,12 +1004,13 @@
     const statusWarning = state.status?.last_error
       ? `<div class="notice">${icons.warning}<span><strong>最近一次配置存在问题：</strong> ${escapeHTML(state.status.last_error)}。当前仍在使用最后一个有效策略。</span></div>`
       : "";
+    const catalogWarning = state.status?.last_catalog_error
+      ? `<div class="notice">${icons.warning}<span><strong>模型目录连接失败：</strong>${escapeHTML(state.status.last_catalog_error)}<br>请检查插件 management_url 和管理会话；目录连接恢复前，受限目录返回空列表。</span></div>`
+      : "";
     const runtimeWarning = state.status?.runtime_warning
       ? `<div class="notice">${icons.warning}<span><strong>最近的策略拒绝：</strong> ${escapeHTML(runtimeWarningText(state.status.runtime_warning))}</span></div>`
       : "";
-    const reconcileNotice = state.reconcileNotice
-      ? `<div class="notice"><span>${escapeHTML(state.reconcileNotice)}</span></div>`
-      : "";
+
     const staleWarning = staleCount
       ? `<div class="notice">${icons.warning}<span><strong>${staleCount} 条失效策略：</strong>这些 caller scope 不对应 CPA 当前 Key。保存时会原样保留，不会静默删除；请在确认旧 Key 已永久移除后通过策略文件处理。</span></div>`
       : "";
@@ -1053,18 +1019,18 @@
       <header class="editor-head">
         <div class="editor-title-wrap">
           <p class="editor-kicker">Access overview</p>
-          <h1>上游配置权限概览</h1>
-          <p class="editor-subtitle">API Key 的创建、删除和生命周期完全由 CPA 管理；此页面只为现有 Key 配置上游配置规则。</p>
+          <h1>模型与上游权限概览</h1>
+          <p class="editor-subtitle">API Key 由 CPA 管理；此页面为现有 Key 配置模型和上游权限。</p>
         </div>
       </header>
       ${statusWarning}
+      ${catalogWarning}
       ${runtimeWarning}
-      ${reconcileNotice}
       ${staleWarning}
       <section class="overview-grid" aria-label="权限统计">
         ${statCard("当前 CPA Key", state.keys.length, "只读同步")}
         ${statCard("已配置", configured, "含 allow 或 deny")}
-        ${statCard("默认允许", defaults, "没有上游配置规则")}
+        ${statCard("默认允许", defaults, "没有权限规则")}
         ${statCard("失效策略", staleCount, "保存时仍保留", staleCount > 0)}
       </section>
       <section class="card">
@@ -1075,7 +1041,7 @@
         <div class="card-head"><h2>认证边界</h2><p>Key 身份与上游配置授权相互分离。</p></div>
         <div class="info-callout">
           <span class="callout-icon">${icons.key}</span>
-          <div><strong>认证由 CPA 内置 API Keys 管理</strong><p>插件仅接收 CPA 提供的 caller scope，并据此执行 allow_profiles 与 deny_profiles。未配置策略或规则为空时，默认允许全部上游配置。</p></div>
+          <div><strong>认证由 CPA 内置 API Keys 管理</strong><p>插件按 caller scope 同时检查模型和上游配置规则，并过滤模型列表；未配置规则的 Key 默认允许全部。</p></div>
         </div>
       </section>
       <section class="card">
@@ -1112,35 +1078,42 @@
           <p class="editor-subtitle key-summary"><span class="mono masked-key">${escapeHTML(key.masked)}</span><span class="mono">SHA-256 ${escapeHTML(key.fingerprint)}</span></p>
         </div>
       </header>
-      ${empty ? `<div class="default-notice">${icons.check}<span><strong>当前默认允许全部上游配置。</strong>从目录中选择允许或拒绝上游配置后才会为此 Key 写入策略。</span></div>` : ""}
+      ${empty ? `<div class="default-notice">${icons.check}<span><strong>当前默认允许全部模型和上游配置。</strong>选择模型或上游配置规则后保存。</span></div>` : ""}
       <section class="card rules-card">
         <div class="card-head"><h2>上游配置规则</h2><p>直接从 CPA 可用上游配置目录中选择；拒绝规则始终优先于允许规则。</p></div>
         ${profilePicker("allow_profiles", "允许上游配置", "设置后，仅允许列表中的上游配置", key.allow_profiles, false)}
         ${profilePicker("deny_profiles", "拒绝上游配置", "命中后始终拒绝访问", key.deny_profiles, true)}
+      </section>
+      <section class="card rules-card">
+        <div class="card-head"><h2>模型规则</h2><p>模型必须同时通过模型规则和上游配置规则，才会显示在模型列表中。</p></div>
+        ${state.modelsError ? `<p class="catalog-notice">${escapeHTML(state.modelsError)}</p>` : ""}
+        ${profilePicker("allow_models", "允许模型", "设置后，仅允许列表中的模型", key.allow_models, false)}
+        ${profilePicker("deny_models", "拒绝模型", "命中后始终拒绝访问", key.deny_models, true)}
       </section>
       <div class="privacy-note">Management Key 复用 CPAMC 已保存的同源会话；完整下游 CPA Key 仅在内存中用于计算 caller scope 和生成首尾脱敏显示，不会写入策略、DOM、浏览器存储或 URL。上游凭据仅在内存中用于复现 CPA profile ID，不会写入策略、DOM、浏览器存储或 URL。</div>`;
     editor.dataset.keyIndex = String(index);
   }
 
   function profilePicker(kind, title, description, selectedProfiles, deny) {
+    const catalog = catalogForKind(kind);
     const selected = new Set(selectedProfiles);
     const oppositeProfiles = selectedKey()?.[oppositeProfileKind(kind)] || [];
     const oppositeTitle = deny ? "允许上游配置" : "拒绝上游配置";
     const wildcardRules = selectedProfiles.filter((profile) => profile.includes("*") || profile.includes("?"));
     const wildcardSelected = selected.has("*");
-    const wildcardConflicted = !wildcardSelected && profileRulesConflict("*", oppositeProfiles);
+    const wildcardConflicted = !wildcardSelected && profileRulesConflict("*", oppositeProfiles, kind);
     const matchedRuleFor = (profile) => wildcardRules.find((rule) => profileRuleMatches(rule, profile)) || "";
-    const effectiveCatalogCount = state.profiles.filter((profile) => selected.has(profile.id) || matchedRuleFor(profile)).length;
+    const effectiveCatalogCount = catalog.filter((profile) => selected.has(profile.id) || matchedRuleFor(profile)).length;
     const isOpen = state.openPicker === kind;
     const summary = wildcardSelected
       ? "全部上游配置（*，包含未来新增）"
-      : state.profiles.length
-        ? effectiveCatalogCount ? `已匹配 ${effectiveCatalogCount} / ${state.profiles.length} 个上游配置` : `从 ${state.profiles.length} 个上游配置中选择`
+      : catalog.length
+        ? effectiveCatalogCount ? `已匹配 ${effectiveCatalogCount} / ${catalog.length} 个上游配置` : `从 ${catalog.length} 个上游配置中选择`
         : selectedProfiles.length ? `已保留 ${selectedProfiles.length} 条现有规则` : "上游配置目录不可用";
     const chips = selectedProfiles.length
       ? selectedProfiles.map((profile) => {
           const wildcard = profile.includes("*") || profile.includes("?");
-          const outsideCatalog = !wildcard && !state.profiles.some((candidate) => candidate.id === profile);
+          const outsideCatalog = !wildcard && !catalog.some((candidate) => candidate.id === profile);
           return `<span class="chip ${deny ? "deny" : ""}"><span>${escapeHTML(profile)}</span>${wildcard ? '<small>通配符</small>' : outsideCatalog ? '<small>目录外</small>' : ""}<button class="chip-remove" type="button" data-action="remove-profile" data-kind="${kind}" data-profile="${escapeHTML(profile)}" aria-label="移除此上游配置规则">${icons.close}</button></span>`;
         }).join("")
       : '<span class="empty-chips">尚未选择上游配置</span>';
@@ -1149,25 +1122,25 @@
       <span class="profile-option-copy"><strong>全部上游配置</strong><small>${wildcardConflicted ? `点击将清空${oppositeTitle}规则` : deny ? "* · 此 Key 将无法访问任何上游配置" : "* · 自动包含未来新增上游配置"}</small></span>
       <span class="profile-badge">通配符</span>
     </button>`;
-    const commonWildcards = [];
-    const presetRows = commonWildcards.filter((rule) => selected.has(rule) || state.profiles.some((profile) => profileRuleMatches(rule, profile))).map((rule) => {
+    const commonWildcards = kind.endsWith("_models") ? ["gpt-*", "claude-*", "gemini-*", "o1*", "o3*", "o4*"] : [];
+    const presetRows = commonWildcards.filter((rule) => selected.has(rule) || catalog.some((profile) => profileRuleMatches(rule, profile))).map((rule) => {
       const explicit = selected.has(rule);
       const derived = wildcardSelected && !explicit;
       const checked = explicit || derived;
-      const conflicted = !checked && profileRulesConflict(rule, oppositeProfiles);
-      const matchCount = state.profiles.filter((profile) => profileRuleMatches(rule, profile)).length;
+      const conflicted = !checked && profileRulesConflict(rule, oppositeProfiles, kind);
+      const matchCount = catalog.filter((profile) => profileRuleMatches(rule, profile)).length;
       return `<button class="profile-option preset-option ${checked ? "selected" : ""} ${derived ? "derived" : ""} ${conflicted ? "mutually-excluded" : ""}" type="button" role="option" aria-selected="${checked}" data-action="toggle-profile" data-kind="${kind}" data-profile="${rule}" data-derived="${derived}" data-conflicted="${conflicted}" data-search="${rule} 通配符 wildcard">
         <span class="profile-checkbox" aria-hidden="true">${checked ? icons.check : ""}</span>
         <span class="profile-option-copy"><strong>${rule}</strong><small>${conflicted ? `点击将从${oppositeTitle}中移除冲突规则` : `当前匹配 ${matchCount} 个上游配置，并覆盖未来同前缀上游配置`}</small></span>
         <span class="profile-badge">通配符</span>
       </button>`;
     }).join("");
-    const rows = state.profiles.map((profile) => {
+    const rows = catalog.map((profile) => {
       const explicit = selected.has(profile.id);
       const matchedRule = explicit ? "" : matchedRuleFor(profile);
       const derived = Boolean(matchedRule);
       const checked = explicit || derived;
-      const conflicted = !checked && profileRulesConflict(profile.id, oppositeProfiles);
+      const conflicted = !checked && profileRulesConflict(profile.id, oppositeProfiles, kind);
       return `<button class="profile-option ${checked ? "selected" : ""} ${derived ? "derived" : ""} ${conflicted ? "mutually-excluded" : ""}" type="button" role="option" aria-selected="${checked}" data-action="toggle-profile" data-kind="${kind}" data-profile="${escapeHTML(profile.id)}" data-derived="${derived}" data-matched-rule="${escapeHTML(matchedRule)}" data-conflicted="${conflicted}" data-search="${escapeHTML(`${profile.id} ${profile.provider} ${profile.displayName}`.toLowerCase())}">
         <span class="profile-checkbox" aria-hidden="true">${checked ? icons.check : ""}</span>
         <span class="profile-option-copy"><strong>${escapeHTML(profile.displayName || profile.id)}</strong><small>${escapeHTML(profile.id)}</small>${derived ? `<small>${conflicted ? `点击将从${oppositeTitle}中移除冲突规则并取消此匹配` : `点击将取消${escapeHTML(matchedRule)}匹配`}</small>` : conflicted ? `<small>点击将从${oppositeTitle}中移除冲突规则</small>` : ""}</span>
@@ -1175,20 +1148,23 @@
       </button>`;
     }).join("");
 
-    return `<div class="profile-editor ${deny ? "deny" : ""}">
+    const markup = `<div class="profile-editor ${deny ? "deny" : ""}">
       <div class="tag-head"><div><strong>${escapeHTML(title)}</strong><span>${escapeHTML(description)}</span></div><span class="selection-count">${selectedProfiles.length} 条规则</span></div>
       <button class="profile-trigger ${isOpen ? "open" : ""}" type="button" data-action="toggle-picker" data-kind="${kind}" aria-expanded="${isOpen}">
         <span>${escapeHTML(summary)}</span><span class="picker-chevron" aria-hidden="true">⌄</span>
-        ${state.profiles.length ? `<progress class="selection-meter" max="${state.profiles.length}" value="${effectiveCatalogCount}" aria-label="已匹配 ${effectiveCatalogCount} / ${state.profiles.length} 个上游配置"></progress>` : ""}
+        ${catalog.length ? `<progress class="selection-meter" max="${catalog.length}" value="${effectiveCatalogCount}" aria-label="已匹配 ${effectiveCatalogCount} / ${catalog.length} 个上游配置"></progress>` : ""}
       </button>
       ${isOpen ? `<div class="profile-panel">
-        ${state.profiles.length ? `<div class="profile-search"><span>${icons.search}</span><input type="search" data-profile-search="${kind}" value="${escapeHTML(state.pickerQuery)}" autocomplete="off" placeholder="搜索上游配置…" aria-label="搜索${escapeHTML(title)}"></div>
+        ${catalog.length ? `<div class="profile-search"><span>${icons.search}</span><input type="search" data-profile-search="${kind}" value="${escapeHTML(state.pickerQuery)}" autocomplete="off" placeholder="搜索上游配置…" aria-label="搜索${escapeHTML(title)}"></div>
         <div class="profile-list" role="listbox" aria-multiselectable="true">${wildcardRow}${presetRows}${rows}<p class="profile-empty" hidden>没有匹配的上游配置</p></div>
-        <div class="profile-panel-footer"><span>已匹配 ${effectiveCatalogCount} / ${state.profiles.length}</span><div><button type="button" data-action="select-all-profiles" data-kind="${kind}">全选可用配置</button><button type="button" data-action="clear-profiles" data-kind="${kind}">清空</button></div></div>`
-        : `<div class="profile-list compact" role="listbox" aria-multiselectable="true">${wildcardRow}</div><div class="catalog-notice"><span>${escapeHTML(state.profilesError || "没有可用上游配置目录。")}</span><button type="button" data-action="refresh-profiles">重新加载</button></div>`}
+        <div class="profile-panel-footer"><span>已匹配 ${effectiveCatalogCount} / ${catalog.length}</span><div><button type="button" data-action="select-all-profiles" data-kind="${kind}">全选可用配置</button><button type="button" data-action="clear-profiles" data-kind="${kind}">清空</button></div></div>`
+        : `<div class="profile-list compact" role="listbox" aria-multiselectable="true">${wildcardRow}</div><div class="catalog-notice"><span>${escapeHTML((kind.endsWith("_models") ? state.modelsError : state.profilesError) || "没有可用上游配置目录。")}</span><button type="button" data-action="refresh-profiles">重新加载</button></div>`}
       </div>` : ""}
       <div class="chips">${chips}</div>
     </div>`;
+    return kind.endsWith("_models")
+      ? markup.replace(/(>[^<]*<|(?:placeholder|aria-label|data-search)="[^"]*")/g, (text) => text.replace(/上游配置/g, "模型").replace(/可用配置/g, "可用模型"))
+      : markup;
   }
 
   function formatDate(value) {
@@ -1204,7 +1180,7 @@
   }
 
   function validProfileKind(kind) {
-    return kind === "allow_profiles" || kind === "deny_profiles";
+    return ["allow_models", "deny_models", "allow_profiles", "deny_profiles"].includes(kind);
   }
 
   function restorePickerView(kind, focusSearch = false) {
@@ -1235,11 +1211,11 @@
     return rules.filter((rule) => !profileRulesConflict(rule, [profileID]));
   }
 
-  function expandWildcardForException(rules, excludedProfileID) {
+  function expandWildcardForException(rules, excludedProfileID, kind) {
     const wildcardRules = rules.filter((rule) => rule.includes("*") || rule.includes("?"));
     if (!wildcardRules.length) return rules;
     const explicitRules = rules.filter((rule) => !rule.includes("*") && !rule.includes("?") && rule !== excludedProfileID);
-    const expanded = state.profiles
+    const expanded = catalogForKind(kind)
       .filter((profile) => profile.id !== excludedProfileID && wildcardRules.some((rule) => profilePatternMatches(rule, profile.id)))
       .map((profile) => profile.id);
     return normalizeProfiles([...explicitRules, ...expanded]);
@@ -1259,7 +1235,7 @@
     } else if (derived || current.some((rule) => (rule.includes("*") || rule.includes("?")) && profilePatternMatches(rule, profileID))) {
       // Turn a wildcard selection into explicit current-catalog rules so one
       // profile can be switched off without leaving the wildcard in place.
-      key[kind] = expandWildcardForException(current, profileID);
+      key[kind] = expandWildcardForException(current, profileID, kind);
       key[oppositeKind] = removeConflictingRules(opposite, profileID);
     } else if (profileID === "*") {
       key[kind] = ["*"];
@@ -1278,7 +1254,7 @@
     const key = selectedKey();
     if (!key) return;
     const oppositeKind = oppositeProfileKind(kind);
-    const profileIDs = state.profiles.map((profile) => profile.id).filter(Boolean);
+    const profileIDs = catalogForKind(kind).map((profile) => profile.id).filter(Boolean);
     key[kind] = normalizeProfiles([...key[kind], ...profileIDs]);
     key[oppositeKind] = key[oppositeKind].filter((rule) => !profileIDs.some((profileID) => profileRulesConflict(rule, [profileID])));
     markDirty();
@@ -1318,8 +1294,9 @@
       const result = await fetchCurrentKeys({ includeCatalog: true });
       state.profiles = result.catalog?.profiles || [];
       state.profilesError = result.catalog?.error || "";
-      state.reconcileNotice = "";
-      reconcileProfilePolicies();
+      state.models = result.catalog?.models || [];
+      state.modelsError = result.catalog?.modelsError || "";
+      // Exact allow lists are never expanded automatically.
       renderEditor();
       showToast(state.profiles.length ? `已加载 ${state.profiles.length} 个上游配置` : state.profilesError, state.profiles.length ? "success" : "error");
     } finally {
@@ -1332,12 +1309,16 @@
     const active = state.keys.filter(hasRules).map((key) => ({
       caller_scope: key.scope,
       allow_profiles: [...key.allow_profiles],
-      deny_profiles: [...key.deny_profiles]
+      deny_profiles: [...key.deny_profiles],
+      allow_models: [...key.allow_models],
+      deny_models: [...key.deny_models]
     }));
     const stale = state.stalePolicies.map((policy) => ({
       caller_scope: policy.caller_scope,
       allow_profiles: [...policy.allow_profiles],
-      deny_profiles: [...policy.deny_profiles]
+      deny_profiles: [...policy.deny_profiles],
+      allow_models: [...policy.allow_models],
+      deny_models: [...policy.deny_models]
     }));
     return { version: 2, policies: [...active, ...stale] };
   }
@@ -1382,8 +1363,7 @@
       applyPolicyDocument(response?.policy || submittedPolicy);
       state.revision = Number(response?.revision ?? expectedRevision + 1);
       state.dirty = false;
-      state.reconcileNotice = "";
-      renderAll();
+        renderAll();
       if (keySetChangedAfterSave) {
         showToast("策略已保存，但 CPA Key 列表在保存期间发生变化；新 Key 当前默认允许全部上游配置，请立即检查。", "error");
       } else if (postSaveCheckError) {
@@ -1435,7 +1415,9 @@
     const canonical = (raw) => normalizePolicyDocument(raw).policies.map((policy) => ({
       caller_scope: policy.caller_scope,
       allow_profiles: [...policy.allow_profiles].sort(),
-      deny_profiles: [...policy.deny_profiles].sort()
+      deny_profiles: [...policy.deny_profiles].sort(),
+      allow_models: [...policy.allow_models].sort(),
+      deny_models: [...policy.deny_models].sort()
     })).sort((left, right) => left.caller_scope.localeCompare(right.caller_scope));
     return JSON.stringify(canonical(leftRaw)) === JSON.stringify(canonical(rightRaw));
   }
@@ -1518,7 +1500,6 @@
   }
 
   function initializeChrome() {
-    state.profileCache = loadProfileCache();
     document.documentElement.classList.toggle("is-embedded", window.self !== window.top);
     $("#searchIcon").innerHTML = icons.search;
     refreshDataButton.innerHTML = icons.refresh;

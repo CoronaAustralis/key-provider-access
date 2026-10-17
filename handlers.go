@@ -45,7 +45,11 @@ func interceptRequest(raw []byte, afterAuth bool) ([]byte, error) {
 	if !configured {
 		return okEnvelope(requestInterceptResponse{})
 	}
-	if !afterAuth {
+	model := requestedModel(req.RequestedModel, req.Model)
+	if !modelAllowed(policy, model) {
+		return terminatedModelResponse(model)
+	}
+	if !afterAuth || !hasProfileRules(policy) {
 		return okEnvelope(requestInterceptResponse{})
 	}
 	profile, _ := req.Metadata["selected_auth_id"].(string)
@@ -53,7 +57,7 @@ func interceptRequest(raw []byte, afterAuth bool) ([]byte, error) {
 	if profile == "" {
 		return terminatedPolicyResponse(http.StatusForbidden, "selected profile is unavailable for policy evaluation", "")
 	}
-	if !policyAllowsCandidateWithLegacy(policy, profile, "", globalState.legacyAlias(scope, profile)) && !globalState.isAutoAllowed(scope, profile) {
+	if !policyAllowsCandidateWithLegacy(policy, profile, "", globalState.legacyAlias(scope, profile)) {
 		globalState.recordRuntimeWarning(selectedDeniedWarning)
 		return terminatedPolicyResponse(http.StatusForbidden, "profile is not allowed for this API key", profile)
 	}
@@ -78,6 +82,12 @@ func pickProfile(raw []byte) ([]byte, error) {
 	if !configured {
 		return okEnvelope(schedulerPickResponse{Handled: false})
 	}
+	if !modelAllowed(policy, requestedModelFromScheduler(req)) {
+		return errorEnvelope("model_access_denied", "model is not allowed for this API key", http.StatusForbidden), nil
+	}
+	if !hasProfileRules(policy) {
+		return okEnvelope(schedulerPickResponse{Handled: false})
+	}
 	eligible := make([]schedulerAuthCandidate, 0, len(req.Candidates))
 	for _, candidate := range req.Candidates {
 		candidate.ID = strings.TrimSpace(candidate.ID)
@@ -86,23 +96,24 @@ func pickProfile(raw []byte) ([]byte, error) {
 			globalState.rememberLegacyAlias(scope, candidate.ID, legacyAPIKeyProfileID(candidate))
 		}
 	}
-	if len(eligible) == 0 && len(policy.AllowProfiles) > 0 {
-		// CPA may rotate a profile ID while retaining the same provider. If the
-		// current tier has no allow-list match, adopt current non-denied profiles
-		// transiently so requests continue; the dashboard reconciler persists the
-		// new IDs after the operator reviews and saves the policy.
-		for _, candidate := range req.Candidates {
-			if candidate.ID == "" || !policyAllowsCandidateWithLegacies(runtimePolicy{DenyProfiles: policy.DenyProfiles}, candidate.ID, candidate.Provider, []string{legacyAPIKeyProfileID(candidate)}) {
-				continue
-			}
-			eligible = append(eligible, candidate)
-			globalState.rememberAutoAllowed(scope, candidate.ID)
-		}
-	}
 	if len(eligible) == 0 {
 		globalState.recordRuntimeWarning(profileMatchWarning)
 		return errorEnvelope("profile_access_denied", "no allowed upstream profile is available for this API key", http.StatusForbidden), nil
 	}
+	// Keep CPA priority semantics after filtering by this key's permissions.
+	highest := eligible[0].Priority
+	for _, candidate := range eligible {
+		if candidate.Priority > highest {
+			highest = candidate.Priority
+		}
+	}
+	tier := eligible[:0]
+	for _, candidate := range eligible {
+		if candidate.Priority == highest {
+			tier = append(tier, candidate)
+		}
+	}
+	eligible = tier
 	globalState.clearRuntimeWarning()
 	provider := req.Provider
 	if provider == "" {
@@ -147,15 +158,15 @@ func managementRegistration() managementRegistrationResponse {
 	return managementRegistrationResponse{
 		Routes: []managementRoute{
 			{Method: http.MethodGet, Path: statusPath, Description: "Show key-provider-access status without exposing API keys or caller scopes."},
-			{Method: http.MethodGet, Path: policiesPath, Description: "List caller-scope profile policies."},
-			{Method: http.MethodPut, Path: policiesPath, Description: "Replace all caller-scope profile policies."},
+			{Method: http.MethodGet, Path: policiesPath, Description: "List caller-scope model and profile policies."},
+			{Method: http.MethodPut, Path: policiesPath, Description: "Replace all caller-scope model and profile policies."},
 			{Method: http.MethodPost, Path: reloadPath, Description: "Reload policies from policy_file."},
 			{Method: http.MethodPost, Path: initializeStoragePath, Description: "Create or validate the default plugin-owned TOML policy file."},
 		},
 		Resources: []resourceRoute{{
 			Path:        "/settings",
-			Menu:        "Key Provider Access",
-			Description: "Manage per-key profile access policies in a browser.",
+			Menu:        "Key Model and Provider Access",
+			Description: "Manage per-key model and provider access policies in a browser.",
 		}},
 	}
 }
@@ -167,6 +178,11 @@ func handleManagement(raw []byte) ([]byte, error) {
 	}
 	method := strings.ToUpper(strings.TrimSpace(req.Method))
 	path := strings.TrimRight(strings.TrimSpace(req.Path), "/")
+	// CPA authenticates plugin management routes before dispatch. Resource
+	// pages are public shells and must never be used to learn credentials.
+	if path == statusPath || path == policiesPath || path == reloadPath || path == initializeStoragePath {
+		catalogAccess.rememberManagementSession(req.Headers)
+	}
 	switch {
 	case method == http.MethodGet && path == settingsResourcePath:
 		return settingsPage()
@@ -190,23 +206,30 @@ func managementStatus() ([]byte, error) {
 	globalState.mu.RLock()
 	runtimeWarning := globalState.runtimeWarning
 	globalState.mu.RUnlock()
+	catalogConnected, catalogError := catalogAccess.status(cfg)
 	return managementJSON(http.StatusOK, map[string]any{
-		"plugin":                  pluginID,
-		"version":                 pluginVersion,
-		"schema_version":          schemaVersion,
-		"host_schema_version":     hostSchema,
-		"auth_mode":               "cpa_builtin_api_keys",
-		"identity_source":         "Metadata.caller_scope",
-		"unconfigured_key_action": "allow",
-		"last_error":              lastError,
-		"runtime_warning":         runtimeWarning,
-		"policy_count":            len(snapshot.ByCallerScope),
-		"revision":                revision,
-		"policy_file":             cfg.PolicyFile,
-		"persistent_updates":      cfg.PolicyFile != "",
-		"source":                  source,
-		"updated_at":              formattedTime(updatedAt),
-		"fail_closed":             snapshot.BlockAll,
+		"plugin":                        pluginID,
+		"version":                       pluginVersion,
+		"schema_version":                schemaVersion,
+		"host_schema_version":           hostSchema,
+		"auth_mode":                     "cpa_builtin_api_keys",
+		"identity_source":               "Metadata.caller_scope",
+		"unconfigured_key_action":       "allow",
+		"access_dimensions":             []string{"model", "profile"},
+		"model_list_filtering":          true,
+		"model_catalog_source":          "cpa_management_api",
+		"management_url":                managementURL(cfg),
+		"catalog_credentials_available": catalogConnected,
+		"last_catalog_error":            catalogError,
+		"last_error":                    lastError,
+		"runtime_warning":               runtimeWarning,
+		"policy_count":                  len(snapshot.ByCallerScope),
+		"revision":                      revision,
+		"policy_file":                   cfg.PolicyFile,
+		"persistent_updates":            cfg.PolicyFile != "",
+		"source":                        source,
+		"updated_at":                    formattedTime(updatedAt),
+		"fail_closed":                   snapshot.BlockAll,
 	})
 }
 

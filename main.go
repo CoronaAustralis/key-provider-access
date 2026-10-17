@@ -103,6 +103,8 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		return interceptRequest(request, false)
 	case methodRequestInterceptAfter:
 		return interceptRequest(request, true)
+	case methodResponseInterceptAfter:
+		return interceptModelList(request)
 	case methodSchedulerPick:
 		return pickProfile(request)
 	case methodManagementRegister:
@@ -117,27 +119,31 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 func pluginRegistration() registration {
 	_, _, _, _, hostSchema, _ := globalState.current()
 	registrationSchema := hostSchema
-	if registrationSchema == 0 || registrationSchema > schemaVersion {
-		registrationSchema = schemaVersion
+	if registrationSchema == 0 || registrationSchema > maxRPCSchemaVersion {
+		registrationSchema = maxRPCSchemaVersion
 	}
 	return registration{
 		SchemaVersion: registrationSchema,
 		Metadata: metadata{
-			Name:             "Key Provider Access",
+			Name:             "Key Model and Provider Access",
 			Version:          pluginVersion,
 			Author:           "local",
 			GitHubRepository: "https://github.com/LTbinglingfeng/key-model-access",
 			Logo:             "",
 			ConfigFields: []configField{
+				{Name: "management_url", Type: "string", Description: "Local CPA management origin. Defaults to http://127.0.0.1:8317; only loopback hosts are accepted."},
+				{Name: "management_key_env", Type: "string", Description: "Environment variable containing the CPA Management Key. Defaults to MANAGEMENT_PASSWORD. Otherwise opening the settings page supplies a memory-only management session until restart."},
 				{Name: "policy_file", Type: "string", Description: "Optional strict YAML or TOML v2 policy document. The Web UI initializes a default plugin-owned config.toml when omitted."},
 				{Name: "version", Type: "number", Description: "Inline policy schema version. Only version 2 is supported."},
-				{Name: "policies", Type: "array", Description: "Per-caller-scope allow_profiles and deny_profiles policies. caller_scope is derived by CPA's built-in API-key authentication."},
+				{Name: "policies", Type: "array", Description: "Per-caller-scope allow_models, deny_models, allow_profiles and deny_profiles policies. caller_scope is derived by CPA's built-in API-key authentication."},
 			},
 		},
 		Capabilities: capabilities{
-			RequestInterceptor: hostSchema >= schemaVersion,
-			Scheduler:          true,
-			ManagementAPI:      true,
+			RequestInterceptor:        hostSchema >= schemaVersion,
+			Scheduler:                 true,
+			SchedulerAcrossPriorities: true,
+			ResponseInterceptor:       true,
+			ManagementAPI:             true,
 		},
 	}
 }
