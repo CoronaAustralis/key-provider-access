@@ -22,12 +22,16 @@ const (
 	settingsResourcePath  = "/v0/resource/plugins/key-provider-access/settings"
 	profileMatchWarning   = "profile_match_failed"
 	selectedDeniedWarning = "selected_profile_denied"
+	internalModelSource   = "plugin_host_model_callback"
 )
 
 func interceptRequest(raw []byte, afterAuth bool) ([]byte, error) {
 	var req requestInterceptRequest
 	if err := decodeJSON(raw, &req); err != nil {
 		return nil, err
+	}
+	if isInternalModelRequest(req.Metadata) {
+		return okEnvelope(requestInterceptResponse{})
 	}
 	_, snapshot, _, _, _, _ := globalState.current()
 	if snapshot.BlockAll {
@@ -69,6 +73,9 @@ func pickProfile(raw []byte) ([]byte, error) {
 	var req schedulerPickRequest
 	if err := decodeJSON(raw, &req); err != nil {
 		return nil, err
+	}
+	if isInternalModelRequest(req.Options.Metadata) {
+		return okEnvelope(schedulerPickResponse{Handled: false})
 	}
 	_, snapshot, _, _, _, _ := globalState.current()
 	if snapshot.BlockAll {
@@ -123,6 +130,12 @@ func pickProfile(raw []byte) ([]byte, error) {
 		AuthID:  globalState.nextProfile(scope, provider, req.Model, eligible),
 		Handled: true,
 	})
+}
+
+// CPA sets this marker for host.model.execute and host.model.execute_stream.
+func isInternalModelRequest(metadata map[string]any) bool {
+	source, _ := metadata["source"].(string)
+	return source == internalModelSource
 }
 
 func callerScopeFromMetadata(metadata map[string]any) (string, bool) {

@@ -13,6 +13,8 @@ Version 2 policies support four optional arrays:
 
 Both dimensions must permit access. Deny wins within each dimension. A non-empty allow list is a whitelist; an empty allow list permits everything not denied. A key without a policy permits all access. `*` matches any number of characters (including `/`); `?` matches one character. Matching is case-sensitive.
 
+CPA internal model callbacks marked with `Metadata.source = "plugin_host_model_callback"` bypass this plugin's request checks and delegate scheduling to CPA, regardless of whether `caller_scope` is present. This exemption also applies when the policy is unavailable. The marker is read only from host metadata, never from HTTP headers or request bodies.
+
 The scheduler filters candidates, then round-robins the highest-priority allowed tier. The after-auth hook checks the selected credential again. Unknown/rotated profile IDs are never automatically adopted, and the UI never expands or deletes exact rules when profiles change. Legacy pre-v7.2.146 API-key profile IDs remain supported.
 
 ## Model list filtering on stock CPA
